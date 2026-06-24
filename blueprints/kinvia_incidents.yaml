@@ -5,6 +5,7 @@ blueprint:
 
     Reports Home Assistant incidents to Kinvia (Dumb Edge).
     Kinvia evaluates priority dynamically using server-side rules.
+    Reports recovery when devices return to normal.
 
     Monitors entities by domain (no manual entity selection).
     Kinvia deduplicates open tickets for the same entity and incident type.
@@ -85,6 +86,7 @@ blueprint:
           max: 100
           mode: slider
           unit_of_measurement: "%"
+  source_url: https://github.com/kinvia/home-assistant/blob/main/blueprints/kinvia_incidents.yaml
 
 variables:
   kinvia_url: !input kinvia_url
@@ -125,6 +127,16 @@ condition:
               - condition: template
                 value_template: >-
                   {% set entity_id = trigger.event.data.entity_id %}
+                  {% set domain = entity_id.split('.')[0] %}
+                  {% set old = trigger.event.data.old_state.state if trigger.event.data.old_state else '' %}
+                  {% set new = trigger.event.data.new_state.state if trigger.event.data.new_state else '' %}
+                  {{ domain in monitored_domains
+                     and entity_id not in excluded_entities
+                     and old in ['unavailable', 'unknown']
+                     and new not in ['unavailable', 'unknown', 'none', ''] }}
+              - condition: template
+                value_template: >-
+                  {% set entity_id = trigger.event.data.entity_id %}
                   {% set old = trigger.event.data.old_state.state if trigger.event.data.old_state else '' %}
                   {% set new = trigger.event.data.new_state.state if trigger.event.data.new_state else '' %}
                   {% set old_f = old | float(default=999) %}
@@ -136,6 +148,17 @@ condition:
               - condition: template
                 value_template: >-
                   {% set entity_id = trigger.event.data.entity_id %}
+                  {% set old = trigger.event.data.old_state.state if trigger.event.data.old_state else '' %}
+                  {% set new = trigger.event.data.new_state.state if trigger.event.data.new_state else '' %}
+                  {% set old_f = old | float(default=0) %}
+                  {% set new_f = new | float(default=0) %}
+                  {{ entity_id not in excluded_entities
+                     and state_attr(entity_id, 'device_class') == 'battery'
+                     and new_f >= battery_threshold
+                     and old_f < battery_threshold }}
+              - condition: template
+                value_template: >-
+                  {% set entity_id = trigger.event.data.entity_id %}
                   {% set domain = entity_id.split('.')[0] %}
                   {% set old = trigger.event.data.old_state.state if trigger.event.data.old_state else '' %}
                   {% set new = trigger.event.data.new_state.state if trigger.event.data.new_state else '' %}
@@ -143,6 +166,16 @@ condition:
                      and entity_id not in excluded_entities
                      and new == 'problem'
                      and old != 'problem' }}
+              - condition: template
+                value_template: >-
+                  {% set entity_id = trigger.event.data.entity_id %}
+                  {% set domain = entity_id.split('.')[0] %}
+                  {% set old = trigger.event.data.old_state.state if trigger.event.data.old_state else '' %}
+                  {% set new = trigger.event.data.new_state.state if trigger.event.data.new_state else '' %}
+                  {{ domain in monitored_domains
+                     and entity_id not in excluded_entities
+                     and old == 'problem'
+                     and new != 'problem' }}
 
 action:
   - variables:
@@ -192,16 +225,31 @@ action:
                 and old not in ['unavailable', 'unknown', 'none', '']
                 and new in ['unavailable', 'unknown'] %}
             state_change
+          {% elif domain in monitored_domains
+                and entity_id not in excluded_entities
+                and old in ['unavailable', 'unknown']
+                and new not in ['unavailable', 'unknown', 'none', ''] %}
+            state_recovery
           {% elif entity_id not in excluded_entities
                 and state_attr(entity_id, 'device_class') == 'battery'
                 and new_f < battery_threshold
                 and old_f >= battery_threshold %}
             battery_low
+          {% elif entity_id not in excluded_entities
+                and state_attr(entity_id, 'device_class') == 'battery'
+                and new_f >= battery_threshold
+                and old_f < battery_threshold %}
+            battery_recovered
           {% elif domain in monitored_domains
                 and entity_id not in excluded_entities
                 and new == 'problem'
                 and old != 'problem' %}
             system_problem
+          {% elif domain in monitored_domains
+                and entity_id not in excluded_entities
+                and old == 'problem'
+                and new != 'problem' %}
+            problem_cleared
           {% else %}
             state_change
           {% endif %}
