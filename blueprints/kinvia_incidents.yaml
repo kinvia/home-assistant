@@ -1,6 +1,8 @@
 blueprint:
   name: Kinvia — Proactive incident reporting
   description: >
+    ⚠️ **IMPORTANT: Rename this automation before saving!** (e.g., "Kinvia - Main House Incident Reporting").
+
     Reports Home Assistant incidents to Kinvia (Dumb Edge).
     Kinvia evaluates priority dynamically using server-side rules.
   domain: automation
@@ -8,8 +10,7 @@ blueprint:
     kinvia_url:
       name: Kinvia base URL
       description: >
-        The base URL of your Kinvia instance.
-        Format must be https://URL:PORT (no trailing slash).
+        The base URL of your Kinvia instance. Format must be https://URL:PORT (no trailing slash).
       selector:
         text:
     kinvia_api_key:
@@ -19,6 +20,19 @@ blueprint:
       selector:
         text:
           type: password
+    monitored_entities:
+      name: Dispositivos y Nodos a monitorizar
+      description: Selecciona todas las luces, enchufes, sensores o grupos que quieres vigilar por caídas.
+      selector:
+        entity:
+          multiple: true
+    battery_entities:
+      name: Sensores de Batería
+      description: Selecciona todas las entidades de batería de la casa.
+      selector:
+        entity:
+          device_class: battery
+          multiple: true
     battery_threshold:
       name: Battery threshold (%)
       description: Report when battery entities fall below this percentage.
@@ -29,7 +43,6 @@ blueprint:
           max: 100
           mode: slider
           unit_of_measurement: "%"
-  source_url: https://github.com/kinvia/infrastructure/blob/main/integrations/home-assistant/kinvia_incidents.yaml
 
 variables:
   kinvia_url: !input kinvia_url
@@ -37,28 +50,29 @@ variables:
   battery_threshold: !input battery_threshold
 
 trigger:
+  # 1. Offline (Dispositivos)
   - id: offline
     platform: state
-    entity_id: "*"
+    entity_id: !input monitored_entities
     to:
       - unavailable
       - unknown
     for:
       minutes: 5
+      
+  # 2. Baterías
   - id: battery_low
     platform: numeric_state
-    entity_id: "*"
-    attribute: battery
+    entity_id: !input battery_entities
     below: !input battery_threshold
-  - id: battery_low_device_class
-    platform: numeric_state
-    entity_id: "*"
-    below: !input battery_threshold
+    
+  # 3. Core/Addons (Problemas de sistema)
   - id: system_problem
     platform: state
-    entity_id: "*"
-    attribute: device_class
+    entity_id: !input monitored_entities
     to: problem
+    
+  # 4. Reparaciones Nativas (Eventos internos de HA)
   - id: repair_event
     platform: event
     event_type: repairs_issue_registry_updated
@@ -90,7 +104,7 @@ action:
         {% if trigger.id == 'repair_event' %}
           {{ none }}
         {% else %}
-          {{ state_attr(trigger.entity_id, 'device_class') }}
+          {{ state_attr(trigger.entity_id, 'device_class') | default(none) }}
         {% endif %}
       entity_state: >-
         {% if trigger.id == 'repair_event' %}
@@ -101,7 +115,7 @@ action:
       incident_type: >-
         {% if trigger.id == 'offline' %}
           state_change
-        {% elif trigger.id in ['battery_low', 'battery_low_device_class'] %}
+        {% elif trigger.id == 'battery_low' %}
           battery_low
         {% elif trigger.id == 'system_problem' %}
           system_problem
@@ -116,33 +130,22 @@ action:
         {% else %}
           {{ '' }}
         {% endif %}
+      
+      # Construcción segura del JSON
       payload_json:
         incident_type: "{{ incident_type }}"
         entity_id: "{{ entity_id }}"
         friendly_name: "{{ friendly_name }}"
         domain: "{{ domain }}"
+        device_class: "{{ device_class if device_class is not none else '' }}"
         state: "{{ entity_state }}"
-        details: "{{ details if details else none }}"
-  - choose:
-      - conditions:
-          - condition: template
-            value_template: "{{ device_class is not none and device_class != '' }}"
-        sequence:
-          - variables:
-              payload_json:
-                incident_type: "{{ incident_type }}"
-                entity_id: "{{ entity_id }}"
-                friendly_name: "{{ friendly_name }}"
-                domain: "{{ domain }}"
-                device_class: "{{ device_class }}"
-                state: "{{ entity_state }}"
-                details: "{{ details if details else none }}"
-    default: []
+        details: "{{ details if details != '' else none }}"
+
   - service: rest_command.kinvia_incident
     data:
       url: "{{ kinvia_url }}/api/v1/webhooks/incidents"
       api_key: "{{ kinvia_api_key }}"
       payload: "{{ payload_json | tojson }}"
 
-mode: queued
+mode: parallel
 max: 20
