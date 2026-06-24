@@ -219,7 +219,7 @@ action:
         domain: "{{ domain }}"
         device_class: "{{ device_class if device_class is not none else '' }}"
         state: "{{ entity_state }}"
-        details: "{{ details if details != '' else none }}"
+        details: "{{ details }}"
 
   - service: rest_command.kinvia_incident
     data:
