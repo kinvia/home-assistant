@@ -5,6 +5,9 @@ blueprint:
 
     Reports Home Assistant incidents to Kinvia (Dumb Edge).
     Kinvia evaluates priority dynamically using server-side rules.
+
+    Monitors entities by domain (no manual entity selection).
+    Kinvia deduplicates open tickets for the same entity and incident type.
   domain: automation
   input:
     kinvia_url:
@@ -20,22 +23,61 @@ blueprint:
       selector:
         text:
           type: password
-    monitored_entities:
-      name: Dispositivos y Nodos a monitorizar
-      description: Selecciona todas las luces, enchufes, sensores o grupos que quieres vigilar por caídas.
+    monitored_domains:
+      name: Dominios a monitorizar
+      description: >
+        Dominios cuyas entidades se vigilan por desconexiones (unavailable/unknown)
+        y problemas de sistema (state = problem). Las baterías se detectan por device_class
+        en cualquier dominio.
+      default:
+        - light
+        - switch
+        - binary_sensor
+        - sensor
+        - cover
+        - climate
+        - lock
+        - fan
+        - camera
+        - media_player
+        - device_tracker
+        - vacuum
+        - valve
+        - water_heater
       selector:
-        entity:
+        select:
           multiple: true
-    battery_entities:
-      name: Sensores de Batería
-      description: Selecciona todas las entidades de batería de la casa.
+          options:
+            - light
+            - switch
+            - binary_sensor
+            - sensor
+            - cover
+            - climate
+            - lock
+            - fan
+            - camera
+            - media_player
+            - device_tracker
+            - vacuum
+            - valve
+            - water_heater
+            - humidifier
+            - number
+            - select
+            - button
+    excluded_entities:
+      name: Entidades excluidas
+      description: >
+        Entidades concretas que no deben generar incidencias aunque pertenezcan
+        a un dominio monitorizado (p. ej. sun.sun, helpers internos).
+      default: []
       selector:
         entity:
-          device_class: battery
           multiple: true
     battery_threshold:
       name: Battery threshold (%)
-      description: Report when battery entities fall below this percentage.
+      description: Report when battery entities cross below this percentage.
       default: 15
       selector:
         number:
@@ -47,37 +89,60 @@ blueprint:
 variables:
   kinvia_url: !input kinvia_url
   kinvia_api_key: !input kinvia_api_key
+  monitored_domains: !input monitored_domains
+  excluded_entities: !input excluded_entities
   battery_threshold: !input battery_threshold
 
 trigger:
-  # 1. Offline (Dispositivos)
-  - id: offline
-    platform: state
-    entity_id: !input monitored_entities
-    to:
-      - unavailable
-      - unknown
-    for:
-      minutes: 5
-      
-  # 2. Baterías
-  - id: battery_low
-    platform: numeric_state
-    entity_id: !input battery_entities
-    below: !input battery_threshold
-    
-  # 3. Core/Addons (Problemas de sistema)
-  - id: system_problem
-    platform: state
-    entity_id: !input monitored_entities
-    to: problem
-    
-  # 4. Reparaciones Nativas (Eventos internos de HA)
+  - id: state_event
+    platform: event
+    event_type: state_changed
   - id: repair_event
     platform: event
     event_type: repairs_issue_registry_updated
 
-condition: []
+condition:
+  - condition: or
+    conditions:
+      - condition: template
+        value_template: "{{ trigger.id == 'repair_event' }}"
+      - condition: and
+        conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'state_event' }}"
+          - condition: or
+            conditions:
+              - condition: template
+                value_template: >-
+                  {% set entity_id = trigger.event.data.entity_id %}
+                  {% set domain = entity_id.split('.')[0] %}
+                  {% set old = trigger.event.data.old_state.state if trigger.event.data.old_state else '' %}
+                  {% set new = trigger.event.data.new_state.state if trigger.event.data.new_state else '' %}
+                  {{ domain in monitored_domains
+                     and entity_id not in excluded_entities
+                     and old not in ['unavailable', 'unknown', 'none', '']
+                     and new in ['unavailable', 'unknown'] }}
+              - condition: template
+                value_template: >-
+                  {% set entity_id = trigger.event.data.entity_id %}
+                  {% set old = trigger.event.data.old_state.state if trigger.event.data.old_state else '' %}
+                  {% set new = trigger.event.data.new_state.state if trigger.event.data.new_state else '' %}
+                  {% set old_f = old | float(default=999) %}
+                  {% set new_f = new | float(default=999) %}
+                  {{ entity_id not in excluded_entities
+                     and state_attr(entity_id, 'device_class') == 'battery'
+                     and new_f < battery_threshold
+                     and old_f >= battery_threshold }}
+              - condition: template
+                value_template: >-
+                  {% set entity_id = trigger.event.data.entity_id %}
+                  {% set domain = entity_id.split('.')[0] %}
+                  {% set old = trigger.event.data.old_state.state if trigger.event.data.old_state else '' %}
+                  {% set new = trigger.event.data.new_state.state if trigger.event.data.new_state else '' %}
+                  {{ domain in monitored_domains
+                     and entity_id not in excluded_entities
+                     and new == 'problem'
+                     and old != 'problem' }}
 
 action:
   - variables:
@@ -86,43 +151,60 @@ action:
         {% if trigger.id == 'repair_event' %}
           repairs.{{ trigger.event.data.issue_id | default('unknown') }}
         {% else %}
-          {{ trigger.entity_id }}
+          {{ trigger.event.data.entity_id }}
         {% endif %}
       friendly_name: >-
         {% if trigger.id == 'repair_event' %}
           HA Repair: {{ trigger.event.data.issue_id | default('unknown') }}
         {% else %}
-          {{ state_attr(trigger.entity_id, 'friendly_name') | default(trigger.entity_id) }}
+          {{ state_attr(trigger.event.data.entity_id, 'friendly_name') | default(trigger.event.data.entity_id) }}
         {% endif %}
       domain: >-
         {% if trigger.id == 'repair_event' %}
           repairs
         {% else %}
-          {{ trigger.entity_id.split('.')[0] }}
+          {{ trigger.event.data.entity_id.split('.')[0] }}
         {% endif %}
       device_class: >-
         {% if trigger.id == 'repair_event' %}
           {{ none }}
         {% else %}
-          {{ state_attr(trigger.entity_id, 'device_class') | default(none) }}
+          {{ state_attr(trigger.event.data.entity_id, 'device_class') | default(none) }}
         {% endif %}
       entity_state: >-
         {% if trigger.id == 'repair_event' %}
           updated
         {% else %}
-          {{ trigger.to_state.state }}
+          {{ trigger.event.data.new_state.state if trigger.event.data.new_state else '' }}
         {% endif %}
       incident_type: >-
-        {% if trigger.id == 'offline' %}
-          state_change
-        {% elif trigger.id == 'battery_low' %}
-          battery_low
-        {% elif trigger.id == 'system_problem' %}
-          system_problem
-        {% elif trigger.id == 'repair_event' %}
+        {% if trigger.id == 'repair_event' %}
           repair_event
         {% else %}
-          state_change
+          {% set entity_id = trigger.event.data.entity_id %}
+          {% set domain = entity_id.split('.')[0] %}
+          {% set old = trigger.event.data.old_state.state if trigger.event.data.old_state else '' %}
+          {% set new = trigger.event.data.new_state.state if trigger.event.data.new_state else '' %}
+          {% set old_f = old | float(default=999) %}
+          {% set new_f = new | float(default=999) %}
+          {% if domain in monitored_domains
+                and entity_id not in excluded_entities
+                and old not in ['unavailable', 'unknown', 'none', '']
+                and new in ['unavailable', 'unknown'] %}
+            state_change
+          {% elif entity_id not in excluded_entities
+                and state_attr(entity_id, 'device_class') == 'battery'
+                and new_f < battery_threshold
+                and old_f >= battery_threshold %}
+            battery_low
+          {% elif domain in monitored_domains
+                and entity_id not in excluded_entities
+                and new == 'problem'
+                and old != 'problem' %}
+            system_problem
+          {% else %}
+            state_change
+          {% endif %}
         {% endif %}
       details: >-
         {% if trigger.id == 'repair_event' %}
@@ -130,8 +212,6 @@ action:
         {% else %}
           {{ '' }}
         {% endif %}
-      
-      # Construcción segura del JSON
       payload_json:
         incident_type: "{{ incident_type }}"
         entity_id: "{{ entity_id }}"
