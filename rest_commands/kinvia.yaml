@@ -1,0 +1,9 @@
+kinvia_incident:
+  url: "{{ url }}"
+  method: POST
+  timeout: 30
+  headers:
+    Content-Type: application/json
+    x-api-key: "{{ api_key }}"
+    ngrok-skip-browser-warning: "true"
+  payload: "{{ payload }}"
