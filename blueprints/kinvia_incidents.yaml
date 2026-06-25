@@ -9,6 +9,7 @@ blueprint:
 
     Monitors entities by domain (no manual entity selection).
     Kinvia deduplicates open tickets for the same entity and incident type.
+    Groups pending Home Assistant updates per installation.
   domain: automation
   input:
     kinvia_url:
@@ -137,6 +138,15 @@ condition:
               - condition: template
                 value_template: >-
                   {% set entity_id = trigger.event.data.entity_id %}
+                  {% set domain = entity_id.split('.')[0] %}
+                  {% set new = trigger.event.data.new_state.state if trigger.event.data.new_state else '' %}
+                  {{ domain == 'sensor'
+                     and entity_id not in excluded_entities
+                     and trigger.event.data.old_state is none
+                     and new not in ['unavailable', 'unknown', 'none', ''] }}
+              - condition: template
+                value_template: >-
+                  {% set entity_id = trigger.event.data.entity_id %}
                   {% set old = trigger.event.data.old_state.state if trigger.event.data.old_state else '' %}
                   {% set new = trigger.event.data.new_state.state if trigger.event.data.new_state else '' %}
                   {% set old_f = old | float(default=999) %}
@@ -176,6 +186,27 @@ condition:
                      and entity_id not in excluded_entities
                      and old == 'problem'
                      and new != 'problem' }}
+              - condition: template
+                value_template: >-
+                  {% set entity_id = trigger.event.data.entity_id %}
+                  {% set domain = entity_id.split('.')[0] %}
+                  {% set old = trigger.event.data.old_state.state if trigger.event.data.old_state else '' %}
+                  {% set new = trigger.event.data.new_state.state if trigger.event.data.new_state else '' %}
+                  {{ domain == 'update'
+                     and entity_id not in excluded_entities
+                     and new == 'on'
+                     and old not in ['on', 'unavailable', 'unknown', 'none', ''] }}
+              - condition: template
+                value_template: >-
+                  {% set entity_id = trigger.event.data.entity_id %}
+                  {% set domain = entity_id.split('.')[0] %}
+                  {% set old = trigger.event.data.old_state.state if trigger.event.data.old_state else '' %}
+                  {% set new = trigger.event.data.new_state.state if trigger.event.data.new_state else '' %}
+                  {{ domain == 'update'
+                     and entity_id not in excluded_entities
+                     and old == 'on'
+                     and new != 'on'
+                     and new not in ['unavailable', 'unknown', 'none', ''] }}
 
 action:
   - variables:
@@ -230,6 +261,11 @@ action:
                 and old in ['unavailable', 'unknown']
                 and new not in ['unavailable', 'unknown', 'none', ''] %}
             state_recovery
+          {% elif domain == 'sensor'
+                and entity_id not in excluded_entities
+                and trigger.event.data.old_state is none
+                and new not in ['unavailable', 'unknown', 'none', ''] %}
+            state_recovery
           {% elif entity_id not in excluded_entities
                 and state_attr(entity_id, 'device_class') == 'battery'
                 and new_f < battery_threshold
@@ -250,6 +286,17 @@ action:
                 and old == 'problem'
                 and new != 'problem' %}
             problem_cleared
+          {% elif domain == 'update'
+                and entity_id not in excluded_entities
+                and new == 'on'
+                and old not in ['on', 'unavailable', 'unknown', 'none', ''] %}
+            update_available
+          {% elif domain == 'update'
+                and entity_id not in excluded_entities
+                and old == 'on'
+                and new != 'on'
+                and new not in ['unavailable', 'unknown', 'none', ''] %}
+            update_installed
           {% else %}
             state_change
           {% endif %}
