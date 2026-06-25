@@ -131,19 +131,15 @@ condition:
                   {% set domain = entity_id.split('.')[0] %}
                   {% set old = trigger.event.data.old_state.state if trigger.event.data.old_state else '' %}
                   {% set new = trigger.event.data.new_state.state if trigger.event.data.new_state else '' %}
+                  {% set new_f = new | float(default=-999999) %}
                   {{ domain in monitored_domains
                      and entity_id not in excluded_entities
-                     and old in ['unavailable', 'unknown']
-                     and new not in ['unavailable', 'unknown', 'none', ''] }}
-              - condition: template
-                value_template: >-
-                  {% set entity_id = trigger.event.data.entity_id %}
-                  {% set domain = entity_id.split('.')[0] %}
-                  {% set new = trigger.event.data.new_state.state if trigger.event.data.new_state else '' %}
-                  {{ domain == 'sensor'
-                     and entity_id not in excluded_entities
-                     and trigger.event.data.old_state is none
-                     and new not in ['unavailable', 'unknown', 'none', ''] }}
+                     and new not in ['unavailable', 'unknown', 'none', '']
+                     and (
+                       old in ['unavailable', 'unknown']
+                       or trigger.event.data.old_state is none
+                       or (domain == 'sensor' and old in ['', 'none'] and new_f != -999999)
+                     ) }}
               - condition: template
                 value_template: >-
                   {% set entity_id = trigger.event.data.entity_id %}
@@ -251,6 +247,7 @@ action:
           {% set new = trigger.event.data.new_state.state if trigger.event.data.new_state else '' %}
           {% set old_f = old | float(default=999) %}
           {% set new_f = new | float(default=999) %}
+          {% set measure_new_f = new | float(default=-999999) %}
           {% if domain in monitored_domains
                 and entity_id not in excluded_entities
                 and old not in ['unavailable', 'unknown', 'none', '']
@@ -258,13 +255,12 @@ action:
             state_change
           {% elif domain in monitored_domains
                 and entity_id not in excluded_entities
-                and old in ['unavailable', 'unknown']
-                and new not in ['unavailable', 'unknown', 'none', ''] %}
-            state_recovery
-          {% elif domain == 'sensor'
-                and entity_id not in excluded_entities
-                and trigger.event.data.old_state is none
-                and new not in ['unavailable', 'unknown', 'none', ''] %}
+                and new not in ['unavailable', 'unknown', 'none', '']
+                and (
+                  old in ['unavailable', 'unknown']
+                  or trigger.event.data.old_state is none
+                  or (domain == 'sensor' and old in ['', 'none'] and measure_new_f != -999999)
+                ) %}
             state_recovery
           {% elif entity_id not in excluded_entities
                 and state_attr(entity_id, 'device_class') == 'battery'
@@ -298,9 +294,10 @@ action:
                 and new not in ['unavailable', 'unknown', 'none', ''] %}
             update_installed
           {% else %}
-            state_change
+            
           {% endif %}
         {% endif %}
+      should_report: "{{ incident_type | trim != '' }}"
       details: >-
         {% if trigger.id == 'repair_event' %}
           {{ trigger.event.data | tojson }}
@@ -316,11 +313,16 @@ action:
         state: "{{ entity_state }}"
         details: "{{ details }}"
 
-  - service: rest_command.kinvia_incident
-    data:
-      url: "{{ kinvia_url }}/api/v1/webhooks/incidents"
-      api_key: "{{ kinvia_api_key }}"
-      payload: "{{ payload_json | tojson }}"
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ should_report }}"
+        sequence:
+          - service: rest_command.kinvia_incident
+            data:
+              url: "{{ kinvia_url }}/api/v1/webhooks/incidents"
+              api_key: "{{ kinvia_api_key }}"
+              payload: "{{ payload_json | tojson }}"
 
 mode: parallel
-max: 20
+max: 100
